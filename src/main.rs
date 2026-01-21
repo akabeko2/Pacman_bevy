@@ -2,34 +2,17 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow; // これがないとウィンドウサイズが取れません
 
 // --- コンポーネント定義 ---
-#[derive(Component)]
-struct Player {
-    life: u32,
-}
-
-#[derive(Component)]
-struct Wall;
-
-#[derive(Component)]
-struct Enemy;
-
-#[derive(Component)]
-struct Food;
-
-#[derive(Component)]
-struct CurrentDirection(Vec3);
-
-#[derive(Component)]
-struct Collider {
-    size: Vec2,
-}
-
-#[derive(Resource)]
-struct MapInfo {
-    offset_x: f32,
-    offset_y: f32,
-    snap_threshold: f32,
-}
+// --- コンポーネント・リソース ---
+#[derive(Component)] struct Player { life: u32 }
+#[derive(Component)] struct Wall;
+#[derive(Component)] struct Enemy;
+#[derive(Component)] struct Food;
+#[derive(Component)] struct CurrentDirection(Vec3);
+#[derive(Component)] struct Collider { size: Vec2 }
+#[derive(Component)] struct ScoreText;
+#[derive(Resource)] struct Score(u32);
+#[derive(Resource)] struct MapInfo { offset_x: f32, offset_y: f32, snap_threshold: f32,}
+#[derive(Component, Deref, DerefMut)] struct AnimationTimer(Timer);
 
 // --- 定数 ---
 const SPEED: f32 = 200.0;
@@ -49,19 +32,25 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_systems(Startup, setup)
-        .add_systems(Update, move_player)
+        .add_systems(Startup, setup_ui)
+        .insert_resource(Score(0))
+        .add_systems(Update, (move_player, eat_food, update_score_ui, animate_pacman))
         .run();
 }
 
 // --- 初期配置 (Setup) ---
 fn setup(
     mut commands: Commands,
-    _asset_server: Res<AssetServer>,
+    asset_server: Res<AssetServer>,
+    mut texture_atlas_layouts: ResMut<Assets<TextureAtlasLayout>>, // レイアウト管理用
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
     // カメラ
     commands.spawn(Camera2d::default());
+
+
+
     // マップの全体のサイズを計算
     let map_height = LEVEL_MAP.len() as f32 * TILE_SIZE;
     let map_width = LEVEL_MAP[0].len() as f32 * TILE_SIZE;
@@ -104,23 +93,34 @@ fn setup(
                     ));
                 }
                 'P' => {
+                    // 1. 画像を読み込む
+                    let texture = asset_server.load("pacman.png");
+
+                    // 2. レイアウトを作成
+                    // TextureAtlasLayout::from_grid(1コマのサイズ, 横の列数, 縦の行数, パディング, オフセット)
+                    let layout = TextureAtlasLayout::from_grid(UVec2::new(30, 30), 3, 1, None, None);
+                    let texture_atlas_layout = texture_atlas_layouts.add(layout);
                     commands.spawn((
-                        Sprite::from_color(
-                            Color::srgb(1.0, 1.0, 0.0),
-                            Vec2::new(CHARCTER_SIZE, CHARCTER_SIZE),
-                        ),
+                        Sprite {
+                                    image: texture,
+                                    // ここで「アトラスを使うぞ」と指定し、初期フレーム(index: 0)を設定
+                                    texture_atlas: Some(TextureAtlas {
+                                        layout: texture_atlas_layout,
+                                        index: 0,
+                                    }),
+                                    ..default()
+                                },
                         Transform::from_translation(position),
-                        CurrentDirection(Vec3::ZERO),
-                        Collider {
-                            size: Vec2::new(CHARCTER_SIZE, CHARCTER_SIZE),
-                        },
+                        AnimationTimer(Timer::from_seconds(0.1, TimerMode::Repeating)),
                         Player { life: 3 },
+                        CurrentDirection(Vec3::ZERO),
+                        Collider { size: Vec2::new(CHARCTER_SIZE, CHARCTER_SIZE) },
                     ));
                 }
                 'E' => {
                     commands.spawn((
                         Sprite {
-                            image: _asset_server.load("ghost.png"),
+                            image: asset_server.load("ghost.png"),
                             custom_size: Some(Vec2::new(CHARCTER_SIZE, CHARCTER_SIZE)),
                             ..default()
                         },
@@ -139,6 +139,42 @@ fn setup(
                 }
                 _ => {}
             }
+        }
+    }
+}
+
+fn setup_ui(mut commands: Commands) {
+    // スコアの文字を表示
+    commands.spawn((
+        // テキストの設定
+        Text::new("Score: 0"),
+        TextFont {
+            font_size: 40.0,
+            ..default()
+        },
+        TextColor(Color::WHITE),
+        
+        // レイアウト設定 (CSSの absolute positioning と同じ)
+        Node {
+            position_type: PositionType::Absolute, // 絶対配置
+            bottom: Val::Px(20.0), // 下から20px
+            right: Val::Px(20.0),  // 右から20px
+            ..default()
+        },
+        
+        // タグをつける (これで後から検索できる)
+        ScoreText,
+    ));
+}
+
+fn update_score_ui(
+        score: Res<Score>,
+    mut query: Query<&mut Text, With<ScoreText>>,
+) {
+    if score.is_changed() {
+        // テキストを取り出す
+        if let  Ok(mut text) = query.single_mut(){
+            text.0 = format!("Score: {}", score.0);
         }
     }
 }
@@ -248,15 +284,61 @@ fn move_player(
             if !collision {
                 transform.translation = target_translation;
 
-                // 画面端の判定 (Clamp)
-                transform.translation.x = transform
-                    .translation
-                    .x
-                    .clamp(-x_limit + TILE_SIZE / 2.0, x_limit - TILE_SIZE / 2.0);
-                transform.translation.y = transform
-                    .translation
-                    .y
-                    .clamp(-y_limit + TILE_SIZE / 2.0, y_limit - TILE_SIZE / 2.0);
+                // // 画面端の判定 (Clamp)
+                // transform.translation.x = transform
+                //     .translation
+                //     .x
+                //     .clamp(-x_limit + TILE_SIZE / 2.0, x_limit - TILE_SIZE / 2.0);
+                // transform.translation.y = transform
+                //     .translation
+                //     .y
+                //     .clamp(-y_limit + TILE_SIZE / 2.0, y_limit - TILE_SIZE / 2.0);
+            }
+        }
+    }
+}
+
+fn eat_food(
+    mut commands: Commands,
+    // Add Entity to the tuple to retrieve it
+    food_query: Query<(Entity, &Transform), With<Food>>,
+    player_query: Query<&Transform, With<Player>>,
+    mut scoreboard: ResMut<Score>,
+) {
+    if let Ok(player_transform) = player_query.single() {
+        for (food_entity, food_transform) in food_query.iter() {
+            // Check distance/collision
+            if player_transform
+                .translation
+                .distance(food_transform.translation)
+                < 20.0
+            {
+                // Despawn the specific entity
+                commands.entity(food_entity).despawn();
+                // Increment score
+                scoreboard.0 += 1;
+            }
+        }
+    }
+}
+
+fn animate_pacman(
+    time: Res<Time>,
+    // Spriteを書き換えるので &mut Sprite
+    // タイマーも進めるので &mut AnimationTimer
+    mut query: Query<(&mut AnimationTimer, &mut Sprite), With<Player>>,
+) {
+    for (mut timer, mut sprite) in query.iter_mut() {
+        // 1. タイマーを進める
+        timer.0.tick(time.delta());
+
+        // 2. 設定時間が来たらフレームを進める
+        if timer.0.just_finished() {
+            // sprite.texture_atlas の中身を取り出す (Optionなので)
+            if let Some(atlas) = &mut sprite.texture_atlas {
+                // indexを 0 -> 1 -> 2 -> 0 -> 1... と循環させる
+                // ここでは全3フレームと仮定しているので % 3
+                atlas.index = (atlas.index + 1) % 3;
             }
         }
     }
